@@ -190,9 +190,9 @@ def main():
         label = "Poor 🌧"
 
     msg = (
-        f"<b>☀️ Solar Forecast — {tomorrow.strftime('%A, %-d %b %Y')}</b>\n"
+        f"<b>☀️ {total_kwh:.2f} kWh — {label}</b>\n"
+        f"Solar Forecast · {tomorrow.strftime('%A, %-d %b %Y')}\n"
         f"📍 Bellairpark, Johannesburg\n\n"
-        f"<b>Total: {total_kwh:.2f} kWh</b> — {label}\n\n"
         f"<b>Breakdown:</b>\n"
         f"  ▶ East panels (3×500W):   <b>{kwh['East']:.2f} kWh</b>\n"
         f"  ▶ North panels (3×500W):  <b>{kwh['North']:.2f} kWh</b>\n"
