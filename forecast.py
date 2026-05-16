@@ -196,7 +196,7 @@ def main():
         f"  ▶ East panels (3×545W):   <b>{kwh['East']:.2f} kWh</b>\n"
         f"  ▶ North panels (3×545W):  <b>{kwh['North']:.2f} kWh</b>\n"
         f"  ▶ West panels (3×545W):   <b>{kwh['West']:.2f} kWh</b>\n"
-        f"  ─────────────────────\n"
+        f"  ──────────\n"
         f"  ▶ <b>Total: {total_kwh:.2f} kWh</b>\n\n"
         f"Rating: {label}\n"
         f"(System: 4.9 kWp, 80% efficiency assumed)"
