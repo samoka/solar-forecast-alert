@@ -19,7 +19,7 @@ LAT = -26.2
 LON = 28.1
 TIMEZONE = "Africa/Johannesburg"
 
-PANEL_WP = 545          # Watts-peak per panel
+PANEL_WP = 500          # Watts-peak per panel
 SYSTEM_EFFICIENCY = 0.80  # inverter + wiring losses
 
 # Each group: (count, azimuth_deg, tilt_deg)
@@ -193,13 +193,13 @@ def main():
         f"<b>☀️ Solar Forecast — {tomorrow.strftime('%A, %-d %b %Y')}</b>\n"
         f"📍 Bellairpark, Johannesburg\n\n"
         f"<b>Expected generation:</b>\n"
-        f"  ▶ East panels (3×545W):   <b>{kwh['East']:.2f} kWh</b>\n"
-        f"  ▶ North panels (3×545W):  <b>{kwh['North']:.2f} kWh</b>\n"
-        f"  ▶ West panels (3×545W):   <b>{kwh['West']:.2f} kWh</b>\n"
+        f"  ▶ East panels (3×500W):   <b>{kwh['East']:.2f} kWh</b>\n"
+        f"  ▶ North panels (3×500W):  <b>{kwh['North']:.2f} kWh</b>\n"
+        f"  ▶ West panels (3×500W):   <b>{kwh['West']:.2f} kWh</b>\n"
         f"  ──────────\n"
         f"  ▶ <b>Total: {total_kwh:.2f} kWh</b>\n\n"
         f"Rating: {label}\n"
-        f"(System: 4.9 kWp, 80% efficiency assumed)"
+        f"(System: 4.5 kWp, 80% efficiency assumed)"
     )
 
     print(msg)
