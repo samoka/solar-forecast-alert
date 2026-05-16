@@ -2,14 +2,15 @@
 """
 Polls Telegram for new messages and replies with a solar forecast.
 
-Supported commands:
-  today              → today's forecast
+Deduplication strategy: only process messages received in the last 7 minutes.
+Since the cron runs every 5 minutes, each message is processed by at most one run.
+No external state storage needed.
+
+Supported commands (anywhere in the message):
+  today / now        → today's forecast
   tomorrow           → tomorrow's forecast
   YYYY-MM-DD         → forecast for that specific date
   help               → usage instructions
-
-The last-seen update_id is stored as a GitHub Actions variable (LAST_UPDATE_ID)
-so messages are never processed twice across runs.
 """
 
 import os
@@ -18,14 +19,15 @@ import datetime
 import urllib.request
 import urllib.parse
 import json
+import re
 
 from forecast import build_message, send_telegram
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
-GH_TOKEN           = os.environ.get("GH_TOKEN", "")
-GH_REPO            = os.environ.get("GH_REPO", "")
-LAST_UPDATE_ID     = int(os.environ.get("LAST_UPDATE_ID", "0") or "0")
+
+# Only process messages younger than this (seconds). Must be > cron interval (300s).
+MAX_MESSAGE_AGE_SECS = 7 * 60
 
 HELP_TEXT = (
     "📋 <b>Solar Forecast Bot — Commands</b>\n\n"
@@ -36,8 +38,8 @@ HELP_TEXT = (
 )
 
 
-def get_updates(offset: int) -> list:
-    params = {"offset": offset + 1, "timeout": 0, "limit": 20}
+def get_updates() -> list:
+    params = {"timeout": 0, "limit": 20}
     url = "https://api.telegram.org/bot{}/getUpdates?{}".format(
         TELEGRAM_BOT_TOKEN, urllib.parse.urlencode(params)
     )
@@ -48,49 +50,25 @@ def get_updates(offset: int) -> list:
     return data["result"]
 
 
-def save_last_update_id(update_id: int):
-    if not GH_TOKEN or not GH_REPO:
-        print(f"[skip] GH_TOKEN/GH_REPO not set — not saving update_id {update_id}")
-        return
-    url = f"https://api.github.com/repos/{GH_REPO}/actions/variables/LAST_UPDATE_ID"
-    payload = json.dumps({"name": "LAST_UPDATE_ID", "value": str(update_id)}).encode()
-    req = urllib.request.Request(url, data=payload, method="PATCH",
-                                 headers={
-                                     "Authorization": f"Bearer {GH_TOKEN}",
-                                     "Accept": "application/vnd.github+json",
-                                     "Content-Type": "application/json",
-                                     "X-GitHub-Api-Version": "2022-11-28",
-                                 })
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            if resp.status not in (200, 204):
-                print(f"[warn] Unexpected status saving update_id: {resp.status}")
-    except Exception as e:
-        # Variable may not exist yet on first run — try POST instead
-        url2 = f"https://api.github.com/repos/{GH_REPO}/actions/variables"
-        payload2 = json.dumps({"name": "LAST_UPDATE_ID", "value": str(update_id)}).encode()
-        req2 = urllib.request.Request(url2, data=payload2, method="POST",
-                                      headers={
-                                          "Authorization": f"Bearer {GH_TOKEN}",
-                                          "Accept": "application/vnd.github+json",
-                                          "Content-Type": "application/json",
-                                          "X-GitHub-Api-Version": "2022-11-28",
-                                      })
-        with urllib.request.urlopen(req2, timeout=10):
-            pass
-
-
 def parse_date(text: str) -> datetime.date | None:
+    """Extract a target date from free-form text."""
     text = text.strip().lower()
     today = datetime.date.today()
-    if text in ("today", "now"):
+
+    if re.search(r'\btoday\b|\bnow\b', text):
         return today
-    if text in ("tomorrow",):
+    if re.search(r'\btomorrow\b', text):
         return today + datetime.timedelta(days=1)
-    try:
-        return datetime.date.fromisoformat(text)
-    except ValueError:
-        return None
+
+    # Look for YYYY-MM-DD anywhere in the text
+    match = re.search(r'\b(\d{4}-\d{2}-\d{2})\b', text)
+    if match:
+        try:
+            return datetime.date.fromisoformat(match.group(1))
+        except ValueError:
+            pass
+
+    return None
 
 
 def reply(chat_id: str, text: str):
@@ -98,34 +76,40 @@ def reply(chat_id: str, text: str):
 
 
 def main():
-    updates = get_updates(LAST_UPDATE_ID)
+    now_ts = datetime.datetime.utcnow().timestamp()
+    updates = get_updates()
+
     if not updates:
-        print("No new messages.")
+        print("No messages.")
         return
 
-    last_id = LAST_UPDATE_ID
+    processed = 0
     for update in updates:
-        update_id = update["update_id"]
-        last_id = max(last_id, update_id)
-
         msg = update.get("message") or update.get("edited_message")
         if not msg:
             continue
 
+        # Skip messages older than MAX_MESSAGE_AGE_SECS
+        age = now_ts - msg.get("date", 0)
+        if age > MAX_MESSAGE_AGE_SECS:
+            continue
+
         sender_chat_id = str(msg["chat"]["id"])
         text = (msg.get("text") or "").strip()
-        print(f"Message from {sender_chat_id}: {text!r}")
+        print(f"Message from {sender_chat_id} ({int(age)}s ago): {text!r}")
 
         # Only respond to the authorised chat
         if sender_chat_id != TELEGRAM_CHAT_ID:
-            print(f"  → Ignored (unauthorised chat {sender_chat_id})")
+            print(f"  → Ignored (unauthorised chat)")
             continue
 
         if not text:
             continue
 
+        processed += 1
         lower = text.lower()
-        if lower in ("help", "/help", "/start"):
+
+        if re.search(r'\bhelp\b|^/help$|^/start$', lower):
             reply(sender_chat_id, HELP_TEXT)
             continue
 
@@ -138,21 +122,20 @@ def main():
             continue
 
         if date < datetime.date.today() - datetime.timedelta(days=1):
-            reply(sender_chat_id, "⚠️ Open-Meteo only provides forecasts, not historical data. "
-                                  "Please pick today or a future date.")
+            reply(sender_chat_id,
+                  "⚠️ Open-Meteo only provides forecasts, not historical data. "
+                  "Please pick today or a future date.")
             continue
 
         try:
             print(f"  → Fetching forecast for {date} …")
-            msg_out = build_message(date)
-            reply(sender_chat_id, msg_out)
+            reply(sender_chat_id, build_message(date))
             print("  → Sent.")
         except Exception as e:
             reply(sender_chat_id, f"⚠️ Error fetching forecast: {e}")
 
-    if last_id > LAST_UPDATE_ID:
-        save_last_update_id(last_id)
-        print(f"Saved LAST_UPDATE_ID={last_id}")
+    if processed == 0:
+        print("No recent messages to process.")
 
 
 if __name__ == "__main__":
