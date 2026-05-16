@@ -192,13 +192,11 @@ def main():
     msg = (
         f"<b>☀️ Solar Forecast — {tomorrow.strftime('%A, %-d %b %Y')}</b>\n"
         f"📍 Bellairpark, Johannesburg\n\n"
-        f"<b>Expected generation:</b>\n"
+        f"<b>Total: {total_kwh:.2f} kWh</b> — {label}\n\n"
+        f"<b>Breakdown:</b>\n"
         f"  ▶ East panels (3×500W):   <b>{kwh['East']:.2f} kWh</b>\n"
         f"  ▶ North panels (3×500W):  <b>{kwh['North']:.2f} kWh</b>\n"
-        f"  ▶ West panels (3×500W):   <b>{kwh['West']:.2f} kWh</b>\n"
-        f"  ──────────\n"
-        f"  ▶ <b>Total: {total_kwh:.2f} kWh</b>\n\n"
-        f"Rating: {label}\n"
+        f"  ▶ West panels (3×500W):   <b>{kwh['West']:.2f} kWh</b>\n\n"
         f"(System: 4.5 kWp, 80% efficiency assumed)"
     )
 
