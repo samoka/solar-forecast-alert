@@ -1,0 +1,27 @@
+name: Daily Solar Forecast Alert
+
+on:
+  schedule:
+    # 18:00 UTC = 20:00 SAST (UTC+2)
+    - cron: "0 18 * * *"
+  workflow_dispatch:   # allows manual trigger from the GitHub UI
+
+jobs:
+  forecast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run forecast script
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python forecast.py
