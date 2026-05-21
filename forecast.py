@@ -2,11 +2,13 @@
 """
 Solar forecast for Bellairpark, Johannesburg.
 Can be run directly (sends tomorrow's forecast) or imported by bot_poll.py.
+
+Uses Open-Meteo's global_tilted_irradiance (GTI) per panel group for accuracy,
+plus temperature derating and a conservative system efficiency.
 """
 
 import os
 import sys
-import math
 import datetime
 import urllib.request
 import urllib.parse
@@ -17,56 +19,33 @@ LAT = -26.2
 LON = 28.1
 
 PANEL_WP = 500
-SYSTEM_EFFICIENCY = 0.80
+SYSTEM_EFFICIENCY = 0.75   # conservative: inverter, wiring, soiling losses
+TEMP_COEFF = -0.0035       # power loss per °C above 25°C (typical = -0.35%/°C)
+NOCT = 45                  # nominal operating cell temp (°C) — raises cell temp above ambient
 
+# Open-Meteo azimuth convention: 0=South, -90=East, 90=West, 180=North
+# Our panels face North (equator-facing in southern hemisphere), East, West
 GROUPS = {
-    "East":  {"count": 3, "azimuth": 90,  "tilt": 15},
-    "North": {"count": 3, "azimuth": 0,   "tilt": 15},
-    "West":  {"count": 3, "azimuth": 270, "tilt": 15},
+    "East":  {"count": 3, "tilt": 15, "om_azimuth": -90},
+    "North": {"count": 3, "tilt": 15, "om_azimuth": 180},
+    "West":  {"count": 3, "tilt": 15, "om_azimuth":  90},
 }
 
-# ---------- Solar geometry ----------
 
-def _deg(r): return math.degrees(r)
-def _rad(d): return math.radians(d)
+# ---------- Open-Meteo — one GTI call per panel group + temperature ----------
 
-
-def solar_position(dt_utc: datetime.datetime):
-    day_of_year = dt_utc.timetuple().tm_yday
-    hour_utc = dt_utc.hour + dt_utc.minute / 60 + dt_utc.second / 3600
-    solar_time = hour_utc + LON / 15.0
-    hour_angle = _rad((solar_time - 12) * 15)
-    declination = _rad(23.45 * math.sin(_rad(360 / 365 * (day_of_year - 81))))
-    lat_r = _rad(LAT)
-    sin_elev = (math.sin(lat_r) * math.sin(declination)
-                + math.cos(lat_r) * math.cos(declination) * math.cos(hour_angle))
-    elevation = _deg(math.asin(max(-1, min(1, sin_elev))))
-    cos_az_num = math.sin(declination) - math.sin(lat_r) * sin_elev
-    cos_az_den = math.cos(lat_r) * math.cos(_rad(elevation))
-    if abs(cos_az_den) < 1e-9:
-        azimuth = 0.0
-    else:
-        cos_az = cos_az_num / cos_az_den
-        azimuth = _deg(math.acos(max(-1, min(1, cos_az))))
-        if math.sin(hour_angle) > 0:
-            azimuth = 360 - azimuth
-    return elevation, azimuth
-
-
-def incidence_factor(elevation_deg, sun_az_deg, panel_az_deg, panel_tilt_deg):
-    if elevation_deg <= 0:
-        return 0.0
-    e, sa, pa, pt = _rad(elevation_deg), _rad(sun_az_deg), _rad(panel_az_deg), _rad(panel_tilt_deg)
-    cos_aoi = math.sin(e) * math.cos(pt) + math.cos(e) * math.sin(pt) * math.cos(sa - pa)
-    return max(0.0, cos_aoi)
-
-
-# ---------- Open-Meteo ----------
-
-def fetch_hourly(date: datetime.date) -> dict:
+def fetch_group_gti(date: datetime.date, tilt: int, azimuth: int) -> dict:
+    """
+    Returns {hour_utc: gti_wm2} for a specific tilt/azimuth using the
+    Open-Meteo solar radiation API (global_tilted_irradiance).
+    This accounts for cloud cover, diffuse sky, and ground reflection properly.
+    """
     params = {
-        "latitude": LAT, "longitude": LON,
-        "hourly": "shortwave_radiation,direct_radiation,diffuse_radiation",
+        "latitude": LAT,
+        "longitude": LON,
+        "hourly": "global_tilted_irradiance",
+        "tilt": tilt,
+        "azimuth": azimuth,
         "timezone": "UTC",
         "start_date": date.isoformat(),
         "end_date": date.isoformat(),
@@ -74,37 +53,72 @@ def fetch_hourly(date: datetime.date) -> dict:
     url = "https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode(params)
     with urllib.request.urlopen(url, timeout=20) as resp:
         data = json.loads(resp.read())
-    result = {}
-    for t, g, d, df in zip(data["hourly"]["time"],
-                            data["hourly"]["shortwave_radiation"],
-                            data["hourly"]["direct_radiation"],
-                            data["hourly"]["diffuse_radiation"]):
-        result[int(t[11:13])] = {"ghi": g or 0, "dni_approx": d or 0, "diffuse": df or 0}
-    return result
+    return {
+        int(t[11:13]): (v or 0)
+        for t, v in zip(data["hourly"]["time"],
+                        data["hourly"]["global_tilted_irradiance"])
+    }
+
+
+def fetch_temperature(date: datetime.date) -> dict:
+    """Returns {hour_utc: temp_celsius} for the day."""
+    params = {
+        "latitude": LAT,
+        "longitude": LON,
+        "hourly": "temperature_2m",
+        "timezone": "UTC",
+        "start_date": date.isoformat(),
+        "end_date": date.isoformat(),
+    }
+    url = "https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode(params)
+    with urllib.request.urlopen(url, timeout=20) as resp:
+        data = json.loads(resp.read())
+    return {
+        int(t[11:13]): (v or 25)
+        for t, v in zip(data["hourly"]["time"],
+                        data["hourly"]["temperature_2m"])
+    }
 
 
 # ---------- Energy calculation ----------
 
-def estimate_kwh(hourly: dict, date: datetime.date) -> dict:
-    totals = {g: 0.0 for g in GROUPS}
-    for hour_utc, irr in hourly.items():
-        dt_utc = datetime.datetime(date.year, date.month, date.day, hour_utc, 30)
-        elev, sun_az = solar_position(dt_utc)
-        if elev <= 0 or irr["ghi"] <= 0:
-            continue
-        for name, cfg in GROUPS.items():
-            factor = incidence_factor(elev, sun_az, cfg["azimuth"], cfg["tilt"])
-            poa = irr["dni_approx"] * factor + irr["diffuse"] * (1 + math.cos(_rad(cfg["tilt"]))) / 2
-            power_w = (poa / 1000) * PANEL_WP * cfg["count"] * SYSTEM_EFFICIENCY
-            totals[name] += power_w / 1000
+def estimate_kwh(date: datetime.date) -> dict:
+    """
+    Fetches GTI per group and temperature, applies temperature derating,
+    returns {group_name: kwh}.
+    """
+    temps = fetch_temperature(date)
+    totals = {}
+
+    for name, cfg in GROUPS.items():
+        gti_hourly = fetch_group_gti(date, cfg["tilt"], cfg["om_azimuth"])
+        group_kwh = 0.0
+
+        for hour_utc, gti in gti_hourly.items():
+            if gti <= 0:
+                continue
+
+            # Cell temperature rises above ambient due to irradiance heating
+            t_ambient = temps.get(hour_utc, 25)
+            t_cell = t_ambient + (NOCT - 20) * (gti / 800)
+
+            # Temperature derating factor
+            temp_factor = 1 + TEMP_COEFF * (t_cell - 25)
+            temp_factor = max(0.5, temp_factor)  # cap losses at 50%
+
+            # Power per hour: (GTI/1000) × Wp × panels × efficiency × temp_factor
+            power_w = (gti / 1000) * PANEL_WP * cfg["count"] * SYSTEM_EFFICIENCY * temp_factor
+            group_kwh += power_w / 1000  # Wh → kWh
+
+        totals[name] = group_kwh
+
     return totals
 
 
 # ---------- Message builder ----------
 
 def build_message(date: datetime.date) -> str:
-    hourly = fetch_hourly(date)
-    kwh = estimate_kwh(hourly, date)
+    kwh = estimate_kwh(date)
     total_kwh = sum(kwh.values())
     peak_wp = sum(cfg["count"] * PANEL_WP for cfg in GROUPS.values())
 
@@ -133,7 +147,7 @@ def build_message(date: datetime.date) -> str:
         f"  ▶ East panels (3×500W):   <b>{kwh['East']:.2f} kWh</b>\n"
         f"  ▶ North panels (3×500W):  <b>{kwh['North']:.2f} kWh</b>\n"
         f"  ▶ West panels (3×500W):   <b>{kwh['West']:.2f} kWh</b>\n\n"
-        f"(System: 4.5 kWp, 80% efficiency assumed)"
+        f"(System: 4.5 kWp · 75% efficiency · temp derating applied)"
     )
 
 
